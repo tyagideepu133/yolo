@@ -3,3 +3,5 @@
 .vscode/
 yolo.weights
 out_test.mp4
+/examples
+/__pycache__

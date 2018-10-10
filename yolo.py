@@ -2,9 +2,12 @@ import numpy as np
 from helpers import *
 from keras.layers import *
 from keras.models import Model
+from moviepy.editor import VideoFileClip
 import tensorflow as tf
 from tqdm import tqdm
+from lane import *
 import cv2
+
 
 OBJ_THRESHOLD = 0.6
 NMS_THRESHOLD = 0.5
@@ -14,6 +17,14 @@ IMAGE_H, IMAGE_W = 416, 416
 GRID_H,  GRID_W  = 13 , 13
 BOX = 5
 CLASS = 80
+
+from flask import Flask, render_template, Response
+import threading
+from visualizations import *
+
+new_frame = None
+flask_thread = True
+app = Flask(__name__)
 
 def create_model():
 
@@ -179,6 +190,12 @@ def make_yolo(original_image):
     return output_image
 
 
+def pipeline_yolo(img):
+    img_undist, img_lane_augmented, lane_info = lane_process(cv2.resize(img,(1280, 720)))
+    output = vehicle_detection_yolo(img_undist, img_lane_augmented, lane_info)
+    image = make_yolo(output)
+    return image
+
 # Objects detection from image
 def yolo_image(image_path):
 
@@ -189,43 +206,44 @@ def yolo_image(image_path):
 
 # Objects detection from video
 def yolo_video(video_path, faster_times=1):
-    video_out = '/'.join(video_path.split('/')[:-1]) + '/out_' + video_path.split('/')[-1]
-    video_reader = cv2.VideoCapture(video_path)
-    nb_frames = int(video_reader.get(cv2.CAP_PROP_FRAME_COUNT))
-    frame_h = int(video_reader.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    frame_w = int(video_reader.get(cv2.CAP_PROP_FRAME_WIDTH))
-    fps = video_reader.get(cv2.CAP_PROP_FPS)
-    video_writer = cv2.VideoWriter(video_out, cv2.VideoWriter_fourcc(*'XVID'),
-                                   fps * faster_times, (frame_w, frame_h))
-    for _ in tqdm(range(nb_frames)):
-
-        ret, original_image = video_reader.read()
-        image = make_yolo(original_image)
-        video_writer.write(np.uint8(image))
-
-    video_reader.release()
-    video_writer.release()
+    video_output = 'examples/video_output.mp4'
+    clip1 = VideoFileClip("examples/video.mp4").subclip(27,30)
+    clip = clip1.fl_image(pipeline_yolo)
+    clip.write_videofile(video_output, audio=False)
 
 
+def gen():
+    while True:
+        ret, jpeg = cv2.imencode('.jpg', new_frame)
+        frame = jpeg.tobytes()
+        yield (b'--frame\r\n'
+               b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n\r\n')
 
-def yolo_live(mirror=True):
+@app.route('/video_feed')
+def video_feed():
+    return Response(gen(),
+                    mimetype='multipart/x-mixed-replace; boundary=frame')
 
-    cap = cv2.VideoCapture(0)
+def vehicle_detection_yolo(image, image_lane, lane_info):
+    # set the timer
+    start = timer()
+    # compute frame per second
+    fps = 1.0 / (timer() - start)
+    # draw visualization on frame
+    yolo_result = draw_results(image, image_lane, None, fps, lane_info)
+    return yolo_result
 
-    while(True):
+def draw_results(img, image_lane, yolo, fps, lane_info):
+    img_cp = img.copy()
+    img_cp = draw_background_highlight(img_cp, image_lane, 1280)
+    draw_lane_status(img_cp,lane_info)
+    return img_cp
 
-        ret, frame = cap.read()
-        if mirror:
-            frame = cv2.flip(frame, 1)
-        image = make_yolo(frame)
-        cv2.imshow('frame',image)
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            cap.release()
-            cv2.destroyAllWindows()
-            break
-
-def main():
+if __name__ == "__main__":
     x = 0
+    flask_t = threading.Thread(target=app.run, args=('0.0.0.0',))
+    flask_t.start()
+    image = None
     while(x != 4):
         x = int(input("Press 1 for image, 2 for video, 3 for live stream , 4 to exit window \n"))
         if (x == 1):
@@ -236,6 +254,17 @@ def main():
             yolo_video(video)
         if (x == 3):
             print("Press q to exit\n")
-            yolo_live()
-# Press 'q' to quit.
-main()
+            cap = cv2.VideoCapture('http://192.168.43.116:8081')
+            while(True):
+                ret, frame = cap.read()
+                try:
+                    img_undist, img_lane_augmented, lane_info = lane_process(cv2.resize(frame,(1280, 720)))
+                    output = vehicle_detection_yolo(img_undist, img_lane_augmented, lane_info)
+                    image = make_yolo(output)
+                except:
+                    image = frame
+                new_frame = image
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    cap.release()
+                    break
+
